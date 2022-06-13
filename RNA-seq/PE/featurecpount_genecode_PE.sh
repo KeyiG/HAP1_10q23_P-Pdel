@@ -37,9 +37,9 @@ featureCounts \
 #the count table for GSE147770 and our own RNA-seq data was generated separately but with the same script/parameter, only the output file name is different.
 
 #Readme
-#-t: Specify feature type in GTF annotation. Here I chose exon, because on transcript level we might not get the lncRNAs
+#-t: Specify feature type in GTF annotation.
 #-g: Specify attribute type in GTF annotation. Here we could chose e.g. transcript ID or gene ID. I chose gene ID, because I want to do DE analysis on gene level.
-#-s: use '-s 2' if reversely stranded (as is the case for the Illumina Truseq library prep protocol)
+#-s: use '-s 2' if reversely stranded
 #-T: Number of computational cores/threads used for the analysis
 #-p: The experiment is paired end, Keyi note: --countReadPairs is to count the fragment rather than reads, I think it is more appropiate for pair-end dataset. In the version I loaded here, this option is not included. once you specify -p, you count fragment.
 #-M: Multi-mapping reads will also be counted. Each alignment will have 1 count or a fractional count if --fraction is specified
