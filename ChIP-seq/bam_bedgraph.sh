@@ -21,7 +21,7 @@ BAM_PATH=/proj/rmdubl
 OUTPUT=/proj/bedgraph
 
 cd ${BAM_PATH}
-for i in $(ls *H3K27ac_rmdubl.bam | sed 's/.bam//g'); do \
+for i in $(ls *rmdubl.bam | sed 's/.bam//g'); do \
 	bamCoverage \
 		-p 8 \
 		--bam ${i}.bam \
