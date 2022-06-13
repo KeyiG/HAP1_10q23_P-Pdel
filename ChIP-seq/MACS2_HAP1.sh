@@ -1,8 +1,7 @@
 #!/bin/bash
-#made on 20190131
 
 #UPPMAX commands
-#SBATCH -A snic2020-15-292
+#SBATCH -A proj_num
 #SBATCH -p core
 #SBATCH -n 1
 #SBATCH -t 8:00:00
