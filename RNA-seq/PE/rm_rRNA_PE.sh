@@ -39,7 +39,7 @@ done
 
 #Readme:
 #-p specifies the number of computational cores/threads that will be used by the program
-#--rna-strandness: strand-specific information. Needs to be RF if using Illumina Truseq library preparation. R or RF is the choice for dUTP based method which is used by most of the stranded lib prep kit. R for SE and RF for PE.
+#--rna-strandness: strand-specific information. R or RF is the choice for dUTP based method which is used by most of the stranded lib prep kit. R for SE and RF for PE.
 #--un-conc-gz: Write paired-end reads that fail to align concordantly to file(s) at <path>. Useful for rRNA removal
 #--summary-file: Print alignment summary to this file
 #-x path to the pre-built genome index. Note that the index consists of multiple files ending in .ht2 , and only the shared part of the filename should be indicated (e.g. genome if the files are called genome.1.ht2 , genome.2.ht2 , etc).
