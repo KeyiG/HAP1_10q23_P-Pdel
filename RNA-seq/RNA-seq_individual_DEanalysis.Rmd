@@ -1,0 +1,267 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+#load package
+```{r}
+#load all the library that needed
+library(clusterProfiler)
+library(DOSE)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(biomaRt)
+library(tibble)
+library(DESeq2)
+library(limma)
+library("FactoMineR")
+library("factoextra")
+library(ggrepel)
+library(patchwork)
+library(hrbrthemes)
+library(rrvgo)
+library(tximportData)
+library(tximport)
+library(scales)
+library(igraph)
+library(pheatmap)
+library(RColorBrewer)
+library(VennDiagram)
+library(UpSetR)
+
+```
+
+```{r}
+sessionInfo()
+```
+
+#Functions
+```{r}
+#x is vector of condition for building comparison matrix, x is the input file for all the raw readcount, condition is the comparison matrix, fil_num is the cutoff for the prefilter of analysis.
+DE_ana = function (x, condition, fil_num) {
+  coldata <- data.frame (condition)
+  rownames(coldata) <- colnames(x)
+  dds <-DESeqDataSetFromMatrix((x %>% as.matrix() %>% round()), 
+                                                         colData= coldata,
+                                                         design = ~condition)
+  keep <- rowSums(counts(dds)) >= fil_num
+  dds <- dds[keep,]
+  dds <- DESeq(dds)
+  all(rownames(coldata) %in% colnames(x))
+  res <- results(dds, contrast = c("condition","deletion","normal"))
+}
+
+#x is the res output from DE analysis.
+extractDE = function (x, p) {
+  DE <- data.frame(x[ which(x$padj <= p ),]) %>%
+  add_rownames(var="genes") %>%
+  dplyr::inner_join(ensembl2name_loc, by=c("genes"="ensembl_gene_id")) 
+  DE
+}
+
+#GO enrichment and KEGG pathway
+GO_enrichment_human = function (a,b) {
+  library(clusterProfiler)
+  library(DOSE)
+  library(org.Hs.eg.db)
+  library(enrichplot)
+  library(dplyr)
+  enrichGO(gene = a$genes,
+                keyType       = 'ENSEMBL',
+                OrgDb         = org.Hs.eg.db,
+                ont           = b,
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 5,
+                readable      = TRUE)
+}
+
+GSEA_GO_human_deseq2 = function(x) {
+  library(clusterProfiler)
+  library(DOSE)
+  library(org.Hs.eg.db)
+  library(enrichplot)
+  library(ggplot2)
+  library(dplyr)
+  a_list <- x$log2FoldChange
+  names(a_list) <- rownames(x)
+  a_list = sort(a_list, decreasing = TRUE)
+  a_gse <- gseGO(geneList = a_list,
+             ont ="ALL", 
+             keyType = "ENSEMBL", 
+             minGSSize = 5, 
+             maxGSSize = 800, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Hs.eg.db, 
+             pAdjustMethod = "none")
+}
+
+
+
+KEGG_fun_human <- function (x) {
+  library(clusterProfiler)
+  library(DOSE)
+  library(org.Hs.eg.db)
+  library(enrichplot)
+  library(dplyr)
+  enrichKEGG(gene = (bitr(x$genes, fromType = "ENSEMBL", toType = c("ENTREZID"),OrgDb = org.Hs.eg.db)) $ENTREZID,
+                 organism     = 'hsa',
+                 pvalueCutoff = 0.05)
+}
+
+
+#some small changes for plotting enriched GO terms cluster. y is the number plot, note that after                                                   
+custome_emapplot = function (x,y, z, m, nCluster=NULL, node_label="category") {
+  x_pair_t <- enrichplot::pairwise_termsim (x)
+  x_pair_t@result$lgpadj <- -log10(x_pair_t@result$p.adjust)
+  show_cate <- x@result %>% 
+    dplyr::filter(p.adjust <= 0.05) %>%
+    dplyr::slice_min(n=y, order_by=p.adjust)
+  emapplot(x_pair_t, showCategory = show_cate$Description, group_category=T, group_legend=T, color="lgpadj", cex_category=z, cex_label_category=m, nCluster=nCluster, node_label=node_label) + scale_fill_gradient(high = "black", low = "white", name="-log10(p.adj)")
+}
+
+#prepare data for DE gene distribution
+DEnumber_chrsize = function (x) {
+  library(dplyr)  
+  a <- x %>% 
+    dplyr::count(chromosome_name)
+    a$chromosome_name <- sub("^", "chr", a$chromosome_name)
+    a <- dplyr::full_join(a, chr, by=c("chromosome_name"="V1"))
+    a[is.na(a)] <- 0
+    colnames(a) <- NULL
+    colnames(a) <- c("chr", "DEnumber", "chr_size")
+    a$DEnumber <- as.numeric(a$DEnumber)
+    a$chr_size <- as.numeric(a$chr_size)
+    a$DE_density <- a$DEnumber / a$chr_size
+    a <- a %>%
+      dplyr::filter(!chr=="chrMT") #filter out 2 DE genes on mitochondria
+    print(a)
+}
+
+#to fix the number of axis showing
+fancy_scientific <- function(l) {
+     # turn in to character string in scientific notation
+     l <- format(l, scientific = TRUE)
+     # quote the part before the exponent to keep all the digits
+     l <- gsub("^(.*)e", "'\\1'e", l)
+     # turn the 'e+' into plotmath format
+     l <- gsub("e", "%*%10^", l)
+     # return this as an expression
+     parse(text=l)
+}
+
+#x is th KEGG enrichment result, y is for printing, "UP" or "DOWN", "activated" or "supressed", selected top z based on count/Generatio/bgratio
+get_KEGG_info_2 = function (x,y,z) {
+  library(dplyr)
+  x@result %>%
+  dplyr::filter(p.adjust <= 0.05) %>%
+  dplyr::slice_min(n=z, order_by=p.adjust) %>%
+  dplyr::select(c(ID, Description, p.adjust, geneID, Count)) %>%
+  dplyr::mutate(trend= y) %>%
+  dplyr::arrange(desc(Count)) 
+}
+
+```
+
+
+#DE analysis
+```{r}
+#import the readcount table (already clean up, clip the first row with all the command line, remove the annotation position, only keep ensemble gene ID, length and the count)
+GSE147770_C123_S123_210723 <- read.delim("/Users/keyigeng/Dropbox/HAP1_Gen_insta/readscount/GSE147770_C123_S123_210723_clean.readCount") 
+GSE103405_GSE148175_210723 <- read.delim("/Users/keyigeng/Dropbox/HAP1_Gen_insta/readscount/GSE103405_GSE148175_210723_clean.readCount")
+RNA_seq_191215 <- read.delim("/Users/keyigeng/Dropbox/illuminadata/RNA_seq_191215/featurecount/HAP1_px459_635645_191217_genecode_clean.readCount")
+RNA_seq_191215$Genes <- str_replace(RNA_seq_191215$Geneid,
+                        pattern = ".[0-9]+$",
+                        replacement = "")
+#pack all the four dataset into one table
+allfour_HAP1_RNAseq <- RNA_seq_191215 %>%
+  dplyr::inner_join(GSE147770_C123_S123_210723, by=c("Geneid"="Geneid")) %>%
+  dplyr::inner_join(GSE103405_GSE148175_210723, by=c("Geneid"="Geneid")) %>%
+  dplyr::select(!c("Length.y", "Geneid")) 
+colnames(allfour_HAP1_RNAseq) <- c("our_ctrl_r1", "our_ctrl_r2","our_td_r1", "our_td_r2","Genes", "length", "GSE147770_C1", "GSE147770_C2", "GSE147770_C3", "GSE147770_S1", "GSE147770_S2", "GSE147770_S3", "GSE103405_ko1", "GSE103405_ko2", "GSE103405_wt1", "GSE103405_wt2","GSE148175_koSMARCC1_r1", "GSE148175_koSMARCC1_r2", "GSE148175_koSMARCC2_r1", "GSE148175_koSMARCC2_r2")
+
+#use DEseq2 to do differential expression analysis
+#prepare input file format
+allfour_HAP1_RNAseq_input <- allfour_HAP1_RNAseq %>%
+  dplyr::select(!c("length")) %>%
+  tibble::column_to_rownames(var="Genes")
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "hsapiens_gene_ensembl", host="https://may2021.archive.ensembl.org") 
+ensembl2name_loc <- getBM(attributes=c("ensembl_gene_id","external_gene_name","chromosome_name","start_position", "end_position"),mart=mart)
+rm(GSE147770_C123_S123_210723, GSE103405_GSE148175_210723, RNA_seq_191215)
+
+
+DEana_ourHAP1 <- DE_ana(allfour_HAP1_RNAseq_input[,1:4], c(rep(c("normal", "deletion"), each=2)), 12)
+DEana_ourHAP1_005 <- extractDE(DEana_ourHAP1, 0.05)
+
+DEana_GSE147770 <- DE_ana(allfour_HAP1_RNAseq_input[,5:10], c(rep(c("normal", "deletion"), each=3)), 16)
+DEana_GSE147770_005 <- extractDE(DEana_GSE147770, 0.05)
+
+DEana_GSE103405 <- DE_ana(allfour_HAP1_RNAseq_input[,11:14], c(rep(c("deletion", "normal"), each=2)), 12)
+DEana_GSE103405_005 <- extractDE(DEana_GSE103405, 0.05)
+
+DEana_GSE148175 <- DE_ana(allfour_HAP1_RNAseq_input[,15:18], c(rep(c("deletion", "normal"), each=2)), 12)
+DEana_GSE148175_005 <- extractDE(DEana_GSE148175, 0.05)
+
+```
+
+
+#how good the DE gene overlap.
+```{r}
+#read the DE genes identified using four datasets together and applied batch effect correction.
+allfour_degene <- read.delim("/Users/keyigeng/Dropbox/HAP1_Gen_insta/files/allfour_HAP1_RNAseq_DEdeseq2.txt", sep=" ")
+
+#UpSetR
+list_DE_input_005 <- list(all_batch_correct=as.vector(allfour_degene$genes), this_study=as.vector(DEana_ourHAP1_005$genes), GSE147770=as.vector(DEana_GSE147770_005$genes), GSE103405=as.vector(DEana_GSE103405_005$genes), GSE148175=as.vector(DEana_GSE148175_005$genes))
+upset(fromList(list_DE_input_005), order.by = "freq",  text.scale=1.5)
+
+```
+
+
+#extract the gene found in at least two/three DE analysis and GO analysis, over-representative.
+```{r}
+
+#DE genes shared by three out of four datasets.
+DE_3datasets_005DOWN <- rbind(DEana_ourHAP1_005 %>% dplyr::filter(log2FoldChange<0) %>% dplyr::select (genes), 
+                              DEana_GSE147770_005 %>% dplyr::filter(log2FoldChange<0) %>% dplyr::select (genes), 
+                              DEana_GSE103405_005 %>% dplyr::filter(log2FoldChange<0) %>% dplyr::select (genes), 
+                              DEana_GSE148175_005 %>% dplyr::filter(log2FoldChange<0) %>% dplyr::select (genes)) %>% 
+  dplyr::count(genes) %>% 
+  dplyr::filter(n >= 3)
+#144 genes
+
+DE_3datasets_005UP <- rbind(DEana_ourHAP1_005 %>% dplyr::filter(log2FoldChange>0) %>% dplyr::select (genes), 
+                              DEana_GSE147770_005 %>% dplyr::filter(log2FoldChange>0) %>% dplyr::select (genes), 
+                              DEana_GSE103405_005 %>% dplyr::filter(log2FoldChange>0) %>% dplyr::select (genes), 
+                              DEana_GSE148175_005 %>% dplyr::filter(log2FoldChange>0) %>% dplyr::select (genes)) %>% 
+  dplyr::count(genes) %>% 
+  dplyr::filter(n >= 3)
+#195 genes
+
+DE_3datasets_005DOWN_GOBP <- GO_enrichment_human (DE_3datasets_005DOWN, "BP") #find lots of about replication, cell cycle, also have DSB repair
+#the custom emapplot has been run many times, and then set seed for reproducibility. the y number are set to the one larger than the number of significant GO terms.
+set.seed(123)
+custome_emapplot(DE_3datasets_005DOWN_GOBP, y=100, z=1, m=0.7) 
+
+DE_3datasets_005DOWN_GOMF <- GO_enrichment_human (DE_3datasets_005DOWN, "MF") 
+set.seed(123)
+custome_emapplot(DE_3datasets_005DOWN_GOMF, y=30, z=1, m=1.2)
+
+DE_3datasets_005UP_GOBP <- GO_enrichment_human (DE_3datasets_005UP, "BP") 
+set.seed(123)
+custome_emapplot(DE_3datasets_005UP_GOBP, y=100, z=1, m=0.7)
+
+DE_3datasets_005UP_GOMF <- GO_enrichment_human (DE_3datasets_005UP, "MF")
+set.seed(123)
+custome_emapplot(DE_3datasets_005UP_GOMF, y=30, z=1, m=1.2)
+
+```
+
+
