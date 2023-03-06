@@ -1,0 +1,326 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#This is the notebook for differental acetylation of H3K27 ChIP-seq analysis.
+#load library
+```{r}
+library(DiffBind)
+library(dplyr)
+library(ChIPpeakAnno)
+library(biomaRt)
+library(clusterProfiler)
+library(DOSE)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(dplyr)
+library(RMariaDB)
+library(GenomicFeatures)
+library(circlize)
+library(ComplexHeatmap)
+library(ggVennDiagram)
+library(ggplot2)
+library(tidyverse)
+library(ggraph)
+library(gginnards)
+
+```
+
+#function
+```{r}
+#x is the clusterprofile KEGG result direct output, y is the description of the KEGG pathway interested, and the z is the distance file.
+get_distance_KEGG_DE_DB = function(x, y, z) {
+  library(dplyr)
+  library(tidyverse)
+  library(clusterProfiler)
+  library(DOSE)
+  library(org.Hs.eg.db)
+  library(ggplot2)
+  a <- x@result %>%
+  dplyr::filter(Description==y) %>%
+  dplyr::select(geneID) %>%
+  str_split("/")
+a_ids <- bitr(as.vector(unlist(a)), fromType = "ENTREZID", toType = "ENSEMBL", OrgDb=org.Hs.eg.db)
+b <- z %>%
+  dplyr::filter(geneID_DE %in% (a_ids$ENSEMBL)) %>%
+  dplyr::select(geneID_DE, distance) %>%
+  dplyr::mutate(term=y)
+}
+
+KEGG_fun_human <- function (x) {
+  library(clusterProfiler)
+  library(DOSE)
+  library(org.Hs.eg.db)
+  library(enrichplot)
+  library(dplyr)
+  enrichKEGG(gene = (bitr(x$genes, fromType = "ENSEMBL", toType = c("ENTREZID"),OrgDb = org.Hs.eg.db)) $ENTREZID,
+                 organism     = 'hsa',
+                 pvalueCutoff = 0.05)
+}
+
+GO_enrichment_human = function (a,b) {
+  library(clusterProfiler)
+  library(DOSE)
+  library(org.Hs.eg.db)
+  library(enrichplot)
+  library(dplyr)
+  enrichGO(gene = a$genes,
+                keyType       = 'ENSEMBL',
+                OrgDb         = org.Hs.eg.db,
+                ont           = b,
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                minGSSize     = 5,
+                readable      = TRUE)
+}
+
+plot_cnet_top = function (x,y) {
+  topN <- x@result%>%
+    dplyr::filter(p.adjust <= 0.05) %>%
+    dplyr::slice_min(n=y, order_by=p.adjust)
+  cnetplot <- cnetplot(x, layout = "kk", showCategory = topN$Description)  
+  #how to select the specific term:https://yulab-smu.top/biomedical-knowledge-mining-book/faq.html#showing-specific-pathways
+  cnetplot2 <- delete_layers(cnetplot, "GeomTextRepel")
+  cnetplot2 + geom_node_text(aes_(label = ~name), max.overlaps=Inf, check_overlap = T, repel = T, size=2.5)
+}
+
+```
+
+
+
+```{r}
+#read sample sheet
+peaks <- read.csv("/Users/keyigeng/Dropbox/HAP1_Gen_insta/ChIP-seq/bam_peak/samples_H3K27ac_pooling_211005.txt", sep="\t")
+peaks <- dba(sampleSheet=peaks)
+peaks <- dba.blacklist(peaks)
+overlap <- dba.overlap(peaks, mode=DBA_OLAP_RATE)
+plot(overlap, xlab="Overlapping samples", ylab="Overlapping peaks", type="b")
+counts <- dba.count(peaks, minOverlap = 2)
+plot(counts) 
+#normalizing by RLE, better results than default norm.
+counts <- dba.normalize(counts, normalize = DBA_NORM_RLE)
+
+#plot PCA
+dba.plotPCA(counts, attributes = DBA_CONDITION,  label=DBA_TISSUE, dotSize = 2 , vColors= c("#7F7F7F", "#FE920A")) #pca 1-2 already separates by sample and condition
+dba.plotPCA(counts, attributes = DBA_CONDITION,  label=DBA_TISSUE, dotSize = 2 ,components = 2:3, vColors= c("#7F7F7F", "#FE920A"))
+
+#condition = normal for setting deletion vs normal comparison
+model <- dba.contrast(counts, reorderMeta=list(Condition="normal"))
+
+result <- dba.analyze(model)
+
+dba.show(result,bContrasts=TRUE)
+
+#contrast = 2 for obtaining deletion vs normal comparison
+result.db <- dba.report(result, contrast = 2)
+resultr <- dba.report(result, contrast = 2,  bDB=TRUE, bGain=TRUE, bLoss=TRUE,bAll=FALSE)
+resultr
+
+dba.plotProfile(result, doPlot=TRUE,  sites=resultr, merge=DBA_REPLICATE)
+```
+#Annotate the DAc peak
+
+```{r}
+mart <- useMart(biomart = "ensembl", dataset = "hsapiens_gene_ensembl", host = "may2021.archive.ensembl.org")
+annoData <- getAnnotation(mart, featureType = "TSS")
+peaksAnno <- annotatePeakInBatch(result.db, AnnotationData=annoData)
+write.table(peaksAnno, file="/Users/keyigeng/Dropbox/HAP1_Gen_insta/ChIP-seq/pooling_peakanno_delvsctrl.txt", sep="\t", row.names=F, quote = F) #852 ranges
+
+```
+
+
+
+#volcano plot of DAc peak binding
+```{r}
+#the diffbind package output fold is log2 fold change calculated with DEseq2 package.
+#to make the plot more beautiful, I set limits to FC and FDR, and plot it. later, I will manully change the axis number to >=6 and =<-4 
+H3K27ac_DB_220221_vol <- as.data.frame(peaksAnno) %>%
+  dplyr::mutate(Fold_adj=(ifelse(Fold>-4, Fold, -4))) %>%
+  dplyr::mutate(FDR_adj=(ifelse(FDR>10^(-6), FDR, 10^(-6))))
+
+ggplot(H3K27ac_DB_220221_vol, aes(Fold_adj,-log10(FDR_adj))) +
+  geom_point(data = H3K27ac_DB_220221_vol %>% filter(Fold_adj>0), color="#B2182B", size=1.5) +
+  geom_point(data = H3K27ac_DB_220221_vol %>% filter(Fold_adj<0), color="#0271C6", size=1.5) +
+  geom_line(aes(y=-log10(0.01)), size =0.7, linetype = "dashed", color="black") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 20), 
+        axis.title = element_text(size = 20),
+        plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+        plot.subtitle = element_text(size = 15, face = "bold", hjust = 0.5)) +
+  xlab("log2(FoldChange)") +
+  ylab("-log10(adj.P)")
+
+
+```
+#plot the features of the DAc peaks' location.
+```{r}
+#create TxDB object from ensembl annotation
+txdbH <- makeTxDbFromEnsembl(organism="Homo sapiens",
+                             release=NA,
+                             circ_seqs=NULL,
+                             server="ensembldb.ensembl.org",
+                             username="anonymous", password=NULL, port=0L,
+                             tx_attrib=NULL)
+
+#generate GRanges object from annotated dba result
+bars.in <- GRangesList(rep1=result.db)
+
+#feature barplot of all peaks
+p <- genomicElementDistribution(bars.in, 
+                           TxDb = txdbH,
+                           promoterRegion=c(upstream=2000, downstream=500),
+                           geneDownstream=c(upstream=0, downstream=2000),
+                           promoterLevel=list(
+                             # from 5' -> 3', fixed precedence 3' -> 5'
+                             breaks = c(-2000, -1000, -500, 0, 500),
+                             labels = c("upstream 1-2Kb", "upstream 0.5-1Kb", 
+                                        "upstream <500b", "TSS - 500b"),
+                             colors = c("#FFE5CC", "#FFCA99", 
+                                        "#FFAD65", "#FF8E32")),
+                           plot=T)
+
+#Note: p is a list contains both datasets used and the plot. some manual modification afterwards on the plots to beautify it.
+#the data is store at p$peaks$rep1
+data.frame(p$peaks$rep1) %>% dplyr::count(geneLevel)
+# distalIntergenic 204; geneBody 463; geneDownstream 33, promoter 147
+data.frame(p$peaks$rep1) %>% dplyr::count(ExonIntron)
+#exon 202, intergenic 240, intron 405.
+data.frame(p$peaks$rep1) %>% dplyr::count(Exons)
+#CDS 28, otherExon 54, undefined 645, utr3 27, utr5 93
+```
+
+
+#combine the DE genes with the DAc regions. use bedtools to calculate the distance. see the script in github called closest.sh
+#plot the correlation of FC between DB peak and their nearest DE gene (the distance need to be within 5kb)
+```{r}
+#read the distance file on finding the distance of individual DAc peaks to nearest DE genes.
+DB_DE_dis <- read.delim("/Users/keyigeng/Dropbox/HAP1_Gen_insta/ChIP-seq/DB_DE_dis.txt", header=F) 
+#how many the distance are >=10kb?
+nrow(DB_DE_dis %>% dplyr::filter(V25>10000)) #724
+
+colnames(DB_DE_dis) <- c(colnames(peaksAnno), c("chr_DE", "start_DE", "end_DE", "geneID_DE", "distance"))
+#read the DE genes list given by DEseq2
+allfour_HAP1_RNAseq_DEdeseq2 <- read.delim("/Users/keyigeng/Dropbox/HAP1_Gen_insta/files/allfour_HAP1_RNAseq_DEdeseq2.txt", sep="")
+
+#density plot of how the distance distribute.
+ggplot(DB_DE_dis, aes(x=log10(distance+1))) + 
+  geom_density() +
+  geom_vline(xintercept=log10(5001), size =0.7, linetype = "dashed", color="black") +
+  geom_histogram(aes(y=..density..), alpha=0.5,
+                binwidth = 0.5 ) +
+  theme_bw(base_size = 20) +
+  theme(axis.text = element_text(size = 20), 
+    axis.title = element_text(size = 20))
+
+#extract the fold change from DB and DE, to see if the FC correlate.
+DB_DE_dis_5kbFC <- DB_DE_dis %>%
+  dplyr::filter(distance<5000) %>%
+  dplyr::inner_join(allfour_HAP1_RNAseq_DEdeseq2, by=c("geneID_DE"="genes")) 
+ggplot(DB_DE_dis_5kbFC, aes(x=Fold, y=log2FoldChange)) +
+  geom_point(size=2) +
+  geom_point(data=DB_DE_dis_5kbFC %>% dplyr::filter(seqnames=="chr10") %>% dplyr::filter(start>87700000) %>% dplyr::filter(end<88000000), size=2, color="red") +
+  geom_line(aes(y=0), size =0.7, linetype = "dashed", color="black") +
+  geom_line(aes(x=0), size =0.7, linetype = "dashed", color="black") +
+  geom_smooth(method='lm') +
+  theme_bw(base_size = 20) +
+  theme(axis.text = element_text(size = 20), 
+  axis.title = element_text(size = 20)) 
+cor.test(DB_DE_dis_5kbFC$Fold, DB_DE_dis_5kbFC$log2FoldChange, method = "pearson") #p-value < 2.2e-16 cor: 0.7619181
+
+#feature barplot of the peaks with DE genes located within 5kb.
+DB_sub5kb <-makeGRangesFromDataFrame(DB_DE_dis_5kbFC[,1:4])
+#generate GRanges object from annotated dba result
+DB_sub5kb <- GRangesList(rep1=DB_sub5kb)
+genomicElementDistribution(DB_sub5kb, 
+                           TxDb = txdbH,
+                           promoterRegion=c(upstream=2000, downstream=500),
+                           geneDownstream=c(upstream=0, downstream=2000),
+                           promoterLevel=list(
+                             # from 5' -> 3', fixed precedence 3' -> 5'
+                             breaks = c(-2000, -1000, -500, 0, 500),
+                             labels = c("upstream 1-2Kb", "upstream 0.5-1Kb", 
+                                        "upstream <500b", "TSS - 500b"),
+                             colors = c("#FFE5CC", "#FFCA99", 
+                                        "#FFAD65", "#FF8E32")))
+```
+
+#circle plot combine the DAc, DE and DAc-DE pairs location on different chromosome.
+```{r}
+#read the location of the DE genes.
+DE_location <- read.delim("/Users/keyigeng/Dropbox/HAP1_Gen_insta/files/allfour_HAP1_RNAseq_DE_loc.bed")
+seg.v1 <- DE_location[,c(1:3)] 
+seg.v2 <- (as.data.frame(peaksAnno))[,c(1:3)] 
+seg.v3 <- DB_DE_dis_5kbFC[,1:3] 
+
+#plot
+
+quartz(pointsize = 14)
+par(family = "Helvetica") 
+
+circos.par("start.degree" = 90) #1st chr up
+
+circos.initializeWithIdeogram(plotType = c("axis", "labels"),) #remove ideogram
+
+circos.genomicDensity(seg.v1, col = c("firebrick"), track.height = 0.1) # diff RNA
+circos.yaxis()
+
+circos.genomicDensity(seg.v2, col = c("cornflowerblue"), track.height = 0.1) # diff bind
+circos.yaxis()
+
+circos.genomicDensity(seg.v3, col = c("lightgoldenrod3"), track.height = 0.1)
+circos.yaxis()
+
+legnd = Legend(at = c("DE", "DB","subset DB"), type = "lines", 
+               legend_gp = gpar(col = c("firebrick", "cornflowerblue", "lightgoldenrod3"), lwd = 2), title_position = "topleft") 
+
+draw(legnd, x = unit(4, "mm"), y = unit(4, "mm"), just = c("left", "bottom"))
+
+quartz.save('/Users/keyigeng/Dropbox/HAP1_Gen_insta/ChIP-seq/chromdis.pdf', type = "pdf")
+dev.off()
+
+
+```
+
+
+#investigate the DE gene with DAc peaks nearby.
+```{r}
+DE_DB_dis <- read.delim("/Users/keyigeng/Dropbox/HAP1_Gen_insta/ChIP-seq/DE_DB_dis.txt", header=F)
+colnames(DE_DB_dis) <- c( c("chr_DE", "start_DE", "end_DE", "geneID_DE" ), colnames(peaksAnno), c("distance"))
+
+#the top5 KEGG are all from down-regulated genes based on RNA-seq analysis. allfour_RNAseq_DE_OR_KEGG_DOWN is the variables from RNA-seq analysis. but for easy reproducibility. I copied the script from RNA-seq_DEanalysis.Rmd line 417 to here. and the function KEGG_fun_human to here too.
+allfour_RNAseq_DE_OR_KEGG_DOWN <- KEGG_fun_human(allfour_HAP1_RNAseq_DEdeseq2  %>% filter (log2FoldChange<0)) 
+
+top5KEGG_DEDBdistance <- rbind(get_distance_KEGG_DE_DB(allfour_RNAseq_DE_OR_KEGG_DOWN, "DNA replication", DE_DB_dis), get_distance_KEGG_DE_DB(allfour_RNAseq_DE_OR_KEGG_DOWN, "Homologous recombination", DE_DB_dis), get_distance_KEGG_DE_DB(allfour_RNAseq_DE_OR_KEGG_DOWN, "Mismatch repair", DE_DB_dis), get_distance_KEGG_DE_DB(allfour_RNAseq_DE_OR_KEGG_DOWN, "Cell cycle", DE_DB_dis), get_distance_KEGG_DE_DB(allfour_RNAseq_DE_OR_KEGG_DOWN, "Base excision repair", DE_DB_dis))
+
+#plot the distance of individual gene distance to nearest DB peaks based on KEGG term.
+ggplot(top5KEGG_DEDBdistance, aes(x=term, y=log10(distance+1)))+
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha=0.5, size=1) +
+  theme_bw(base_size = 20) +
+  theme(axis.text = element_text(size = 20), 
+        axis.title = element_text(size = 20),
+        axis.text.x = element_text(angle = 20, size=15, vjust = 0.5, hjust=0.5)) +
+  xlab("")+
+  ylab("log10(distance+1)")
+
+#ENSG00000133119: RFC3 and ENSG00000154920: EME1 have a DAc peak nearby. plot the the top GO term for downregulated genes in RNA-seq analysis to see what they contribute to.
+#similarly, I copied the script generating enriched GO term from RNA-seq_DEanalysis.Rmd for easy reproducibility.
+allfour_RNAseq_DE_OR_GOBP_DOWN <-GO_enrichment_human((allfour_HAP1_RNAseq_DEdeseq2 %>% dplyr::filter(log2FoldChange<0)), "BP") 
+allfour_RNAseq_DE_OR_GOMF_DOWN <-GO_enrichment_human((allfour_HAP1_RNAseq_DEdeseq2 %>% dplyr::filter(log2FoldChange<0)), "MF") 
+plot_cnet_top(allfour_RNAseq_DE_OR_GOBP_DOWN, 6)
+plot_cnet_top(allfour_RNAseq_DE_OR_GOMF_DOWN, 6)
+
+
+#now want to see what function of the DE genes with DAc peak nearby (<)
+DE_DB_dis_5kb <- DE_DB_dis %>%
+  dplyr::filter(distance<5000) %>%
+  dplyr::select(c(1:7, 25))
+colnames(DE_DB_dis_5kb) <- c("chr_DE", "start_DE", "end_DE", "genes", "chr_DB", "start_DB", "end_DB", "distance")
+DE_DB_dis_5kb_ALL <- GO_enrichment_human (DE_DB_dis_5kb, "ALL") #6 terms enriched in total
+cnetplot(DE_DB_dis_5kb_ALL, layout = "kk", showCategory = 6) 
+
+```
+
+
