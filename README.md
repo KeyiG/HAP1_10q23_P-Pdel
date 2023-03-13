@@ -1,4 +1,4 @@
-This repository contains the script for the work: “Cas9-mediated genome engineering exaggerates collateral deletion at the PTEN gene locus mimicking cancer profiles”.
+This repository contains the script for the work: “CRISPR-Cas9-mediated genome engineering exaggerates 10q23.31 deletion including the PTEN gene locus mimicking cancer profiles”.
 
 Three folders ChIP-seq, RNA-seq and patient_sample_analysis contain the script used to analyze the data.
 
